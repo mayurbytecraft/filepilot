@@ -1,36 +1,127 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# FilePilot
 
-## Getting Started
+**A free, browser-based file conversion toolkit built with Next.js.**
 
-First, run the development server:
+FilePilot makes it easy to convert, merge, split, and optimize files through a simple web interface.
+
+## ✨ Features
+
+### Image Tools
+- Convert PNG, JPG, and WebP images.
+- Batch image conversion.
+- Adjust image quality.
+- Download converted files individually or as a ZIP archive.
+- Convert images into PDF documents.
+- Choose A4, Letter, or original image dimensions for PDF output.
+
+### PDF Tools
+- Convert PDF pages into JPG images.
+- Convert PDF pages into PNG images.
+- Process multi-page PDFs.
+- Download individual page images or all pages as a ZIP.
+- Merge multiple PDF files.
+- Extract a selected page range from a PDF.
+- Basic PDF optimization.
+- Strong PDF compression using image-based reconstruction.
+
+**Note:** Strong PDF compression rasterizes pages. Text may no longer be selectable or searchable. Compression results depend on the original document.
+
+## 🛠️ Tech Stack
+
+- Next.js
+- React
+- TypeScript
+- Tailwind CSS
+- JavaScript
+- PDF.js
+- pdf-lib
+- jsPDF
+- JSZip
+
+## 🚀 Getting Started
+
+### Prerequisites
+
+- Node.js
+- npm
+- Git
+
+### Installation
+
+Clone the repository:
+
+```bash
+git clone https://github.com/mayurbytecraft/filepilot.git
+```
+
+Navigate to the project:
+
+```bash
+cd filepilot
+```
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Start the development server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 📁 Project Structure
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```text
+filepilot/
+├── app/
+│   ├── favicon.ico
+│   ├── globals.css
+│   ├── layout.tsx
+│   └── page.tsx
+├── public/
+│   └── pdf.worker.min.mjs
+├── package.json
+├── package-lock.json
+├── next.config.ts
+├── tsconfig.json
+└── README.md
+```
 
-## Learn More
+## 🗺️ Roadmap
 
-To learn more about Next.js, take a look at the following resources:
+- [ ] Additional image formats.
+- [ ] More PDF editing and optimization options.
+- [ ] Document format conversions.
+- [ ] Spreadsheet and data conversions.
+- [ ] Audio and video conversions.
+- [ ] Archive extraction and creation.
+- [ ] Improved conversion performance.
+- [ ] Deployment and production optimization.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## 🔒 Privacy
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+FilePilot is designed with a focus on simple file processing and user privacy. Review the implementation of each tool before relying on it for sensitive documents.
 
-## Deploy on Vercel
+## 🤝 Contributing
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Contributions, suggestions, bug reports, and feature requests are welcome.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+1. Fork the repository.
+2. Create a feature branch.
+3. Make your changes.
+4. Submit a pull request.
+
+## 📄 License
+
+A license has not yet been selected. Until one is added, the repository remains subject to the default copyright rules.
+
+---
+
+**Built with ❤️ by [Mayur](https://github.com/mayurbytecraft)**
+
+GitHub: https://github.com/mayurbytecraft/filepilot
