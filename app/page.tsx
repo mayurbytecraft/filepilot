@@ -580,41 +580,68 @@ export default function Home() {
         pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
         const data = new Uint8Array(await sourceFile.arrayBuffer());
         const pdfDocument = await pdfjsLib.getDocument({ data }).promise;
-        const compressedPdf = new jsPDF({ unit: "mm", format: "a4", compress: true });
+
+        // First try the user's selected settings. If that does not reduce the
+        // file, retry once at a lower resolution and quality before giving up.
+        const attempts = [
+          { scale: 1.35, quality: compressionQuality },
+          { scale: 1.0, quality: Math.min(compressionQuality, 45) },
+        ];
+        let bestBlob: Blob | null = null;
 
         try {
-          for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber++) {
-            const page = await pdfDocument.getPage(pageNumber);
-            const viewport = page.getViewport({ scale: 1.35 });
-            const canvas = document.createElement("canvas");
-            canvas.width = Math.ceil(viewport.width);
-            canvas.height = Math.ceil(viewport.height);
-            const context = canvas.getContext("2d");
-            if (!context) throw new Error("Could not create a canvas for PDF compression.");
+          for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex++) {
+            const attempt = attempts[attemptIndex];
+            const compressedPdf = new jsPDF({ unit: "mm", format: "a4", compress: true });
 
-            await page.render({ canvas, canvasContext: context, viewport }).promise;
-            const imageData = canvas.toDataURL("image/jpeg", compressionQuality / 100);
-            const pageWidthMm = (viewport.width / 1.35) * 25.4 / 72;
-            const pageHeightMm = (viewport.height / 1.35) * 25.4 / 72;
+            for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber++) {
+              const page = await pdfDocument.getPage(pageNumber);
+              const viewport = page.getViewport({ scale: attempt.scale });
+              const canvas = document.createElement("canvas");
+              canvas.width = Math.ceil(viewport.width);
+              canvas.height = Math.ceil(viewport.height);
+              const context = canvas.getContext("2d");
+              if (!context) throw new Error("Could not create a canvas for PDF compression.");
 
-            if (pageNumber > 1) {
-              compressedPdf.addPage([pageWidthMm, pageHeightMm], pageWidthMm > pageHeightMm ? "landscape" : "portrait");
-            } else {
-              compressedPdf.deletePage(1);
-              compressedPdf.addPage([pageWidthMm, pageHeightMm], pageWidthMm > pageHeightMm ? "landscape" : "portrait");
+              await page.render({ canvas, canvasContext: context, viewport }).promise;
+              const imageData = canvas.toDataURL("image/jpeg", attempt.quality / 100);
+              const pageWidthMm = (viewport.width / attempt.scale) * 25.4 / 72;
+              const pageHeightMm = (viewport.height / attempt.scale) * 25.4 / 72;
+              const orientation = pageWidthMm > pageHeightMm ? "landscape" : "portrait";
+
+              if (pageNumber > 1) {
+                compressedPdf.addPage([pageWidthMm, pageHeightMm], orientation);
+              } else {
+                compressedPdf.deletePage(1);
+                compressedPdf.addPage([pageWidthMm, pageHeightMm], orientation);
+              }
+
+              compressedPdf.addImage(imageData, "JPEG", 0, 0, pageWidthMm, pageHeightMm, undefined, "FAST");
+              page.cleanup();
+              canvas.width = 0;
+              canvas.height = 0;
+
+              // Progress reflects the current attempt; the retry starts over.
+              const attemptProgress = Math.round(
+                ((attemptIndex * pdfDocument.numPages + pageNumber) /
+                  (attempts.length * pdfDocument.numPages)) * 100
+              );
+              setProgress(attemptProgress);
             }
 
-            compressedPdf.addImage(imageData, "JPEG", 0, 0, pageWidthMm, pageHeightMm, undefined, "FAST");
-            page.cleanup();
-            setProgress(Math.round((pageNumber / pdfDocument.numPages) * 100));
-            canvas.width = 0;
-            canvas.height = 0;
+            const candidate = compressedPdf.output("blob");
+            if (!bestBlob || candidate.size < bestBlob.size) bestBlob = candidate;
+
+            // A retry is only needed if the first result did not beat the source.
+            if (candidate.size < sourceFile.size) break;
           }
         } finally {
           await pdfDocument.cleanup();
         }
 
-        compressedBlob = compressedPdf.output("blob");
+        if (!bestBlob) throw new Error("Could not create a compressed PDF.");
+        compressedBlob = bestBlob;
+        setProgress(100);
       }
 
       // Never present a larger (or same-sized) file as a successful compression.
@@ -653,7 +680,7 @@ export default function Home() {
         setSuccess(
           `No useful size reduction was possible. ${reason} FilePilot kept your original PDF instead, so you won't download a larger file.` +
           (compressionMode === "strong"
-            ? " Strong compression converts pages to images and may not suit text-based PDFs."
+            ? " Image-based compression may not suit text-based PDFs; FilePilot also retries once at lower resolution if the first result is not smaller."
             : " Basic optimization preserves text but cannot always reduce an already-optimized PDF.")
         );
       }
