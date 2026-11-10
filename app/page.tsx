@@ -36,6 +36,21 @@ function isPdfFile(file: File) {
   return file.type === supportedPdfType || file.name.toLowerCase().endsWith(".pdf");
 }
 
+function isDocxFile(file: File) {
+  return file.name.toLowerCase().endsWith(".docx");
+}
+
+function isTxtFile(file: File) {
+  return file.name.toLowerCase().endsWith(".txt") || file.type === "text/plain";
+}
+
+function getFileKind(file: File) {
+  if (isPdfFile(file)) return "pdf";
+  if (isDocxFile(file)) return "docx";
+  if (isTxtFile(file)) return "txt";
+  return "image";
+}
+
 type ConversionResult = {
   id: string;
   name: string;
@@ -92,8 +107,10 @@ export default function Home() {
   const [compressionQuality, setCompressionQuality] = useState(60);
 
   const isPdfInput = files.length > 0 && isPdfFile(files[0]);
+  const isDocxInput = files.length > 0 && isDocxFile(files[0]);
+  const isTxtInput = files.length > 0 && isTxtFile(files[0]);
   const availableFormats = files.length > 0
-    ? isPdfInput ? ["JPG", "PNG"] : ["PDF", ...imageFormats]
+    ? isPdfInput ? ["JPG", "PNG"] : isDocxInput ? ["TXT", "PDF"] : isTxtInput ? ["PDF"] : ["PDF", ...imageFormats]
     : formats;
 
   useEffect(() => {
@@ -111,24 +128,24 @@ export default function Home() {
   function addFiles(selectedFiles: FileList | File[]) {
     const incoming = Array.from(selectedFiles);
     const validFiles = incoming.filter(
-      (file) => supportedImageTypes.includes(file.type) || isPdfFile(file)
+      (file) => supportedImageTypes.includes(file.type) || isPdfFile(file) || isDocxFile(file) || isTxtFile(file)
     );
     const invalidCount = incoming.length - validFiles.length;
 
     if (invalidCount > 0) {
-      setError(`${invalidCount} unsupported file(s) skipped. Select PNG, JPG, WebP or PDF files.`);
+      setError(`${invalidCount} unsupported file(s) skipped. Select PNG, JPG, WebP, PDF, DOCX or TXT files.`);
     } else {
       setError("");
     }
 
     if (validFiles.length === 0) return;
 
-    const incomingIsPdf = isPdfFile(validFiles[0]);
-    const mixedIncoming = validFiles.some((file) => isPdfFile(file) !== incomingIsPdf);
-    const existingIsPdf = files.length > 0 && isPdfFile(files[0]);
+    const incomingKind = getFileKind(validFiles[0]);
+    const mixedIncoming = validFiles.some((file) => getFileKind(file) !== incomingKind);
+    const existingKind = files.length > 0 ? getFileKind(files[0]) : null;
 
-    if (mixedIncoming || (files.length > 0 && existingIsPdf !== incomingIsPdf)) {
-      setError("Please add PDFs and images in separate batches. Clear the current files before switching file types.");
+    if (mixedIncoming || (existingKind !== null && existingKind !== incomingKind)) {
+      setError("Please add PDFs, Word documents and images in separate batches. Clear the current files before switching file types.");
       if (inputRef.current) inputRef.current.value = "";
       return;
     }
@@ -144,7 +161,7 @@ export default function Home() {
       return combined;
     });
 
-    setFormat(incomingIsPdf ? "JPG" : "JPG");
+    setFormat(incomingKind === "pdf" ? "JPG" : incomingKind === "docx" ? "TXT" : incomingKind === "txt" ? "PDF" : "JPG");
     setResults([]);
     setSuccess("");
     setProgress(0);
@@ -284,6 +301,293 @@ export default function Home() {
       setError(`Failed files: ${failed.join(", ")}`);
     } else {
       setError("All conversions failed. Please try different images.");
+    }
+  }
+
+  async function convertDocxToTxt() {
+    if (files.length === 0 || !files.every(isDocxFile)) {
+      setError("Please select one or more DOCX Word documents.");
+      return;
+    }
+
+    setConverting(true);
+    setError("");
+    setSuccess("");
+    setProgress(0);
+    setResults([]);
+
+    const converted: ConversionResult[] = [];
+    const failed: string[] = [];
+
+    try {
+      // Mammoth extracts document text in the browser; it does not upload files.
+      const mammoth = await import("mammoth");
+
+      for (let index = 0; index < files.length; index++) {
+        const file = files[index];
+        try {
+          const arrayBuffer = await file.arrayBuffer();
+          const extraction = await mammoth.extractRawText({ arrayBuffer });
+          const extractedText = extraction.value.replace(/\r\n/g, "\n").trim();
+
+          if (!extractedText) {
+            throw new Error("No readable text was found in this document.");
+          }
+
+          const blob = new Blob([extractedText], { type: "text/plain;charset=utf-8" });
+          const baseName = file.name.replace(/\.docx$/i, "");
+          converted.push({
+            id: `docx-to-txt-${file.name}-${file.lastModified}-${index}`,
+            name: `${baseName}.txt`,
+            blob,
+            url: URL.createObjectURL(blob),
+            size: blob.size,
+          });
+        } catch (conversionError) {
+          failed.push(`${file.name}${conversionError instanceof Error ? ` (${conversionError.message})` : ""}`);
+        }
+
+        setProgress(Math.round(((index + 1) / files.length) * 100));
+      }
+
+      setResults(converted);
+      if (converted.length > 0 && failed.length === 0) {
+        setSuccess(`Successfully extracted text from ${converted.length} Word document(s).`);
+      } else if (converted.length > 0) {
+        setSuccess(`Converted ${converted.length} document(s); ${failed.length} could not be processed.`);
+        setError(`Could not process: ${failed.join(", ")}`);
+      } else {
+        setError(`DOCX to TXT conversion failed. ${failed.join("; ") || "Please check the selected documents."}`);
+      }
+    } catch (conversionError) {
+      setError(conversionError instanceof Error ? conversionError.message : "Could not load the DOCX text extraction library.");
+    } finally {
+      setConverting(false);
+    }
+  }
+
+  async function convertDocxToPdf() {
+    if (files.length === 0 || !files.every(isDocxFile)) {
+      setError("Please select one or more DOCX Word documents.");
+      return;
+    }
+
+    setConverting(true);
+    setError("");
+    setSuccess("");
+    setProgress(0);
+    setResults([]);
+
+    const converted: ConversionResult[] = [];
+    const failed: string[] = [];
+    let renderContainer: HTMLDivElement | null = null;
+
+    try {
+      const mammoth = await import("mammoth");
+      const html2pdfModule = await import("html2pdf.js");
+      const html2pdf = html2pdfModule.default;
+
+      renderContainer = document.createElement("div");
+      renderContainer.style.position = "fixed";
+      renderContainer.style.left = "-10000px";
+      renderContainer.style.top = "0";
+      renderContainer.style.width = "718px";
+      renderContainer.style.background = "#ffffff";
+      renderContainer.style.color = "#111827";
+      renderContainer.style.padding = "0";
+      renderContainer.style.zIndex = "-1";
+      document.body.appendChild(renderContainer);
+
+      for (let index = 0; index < files.length; index++) {
+        const file = files[index];
+
+        try {
+          const arrayBuffer = await file.arrayBuffer();
+          const conversion = await mammoth.convertToHtml({ arrayBuffer });
+
+          if (!conversion.value.trim()) {
+            throw new Error("No readable document content was found.");
+          }
+
+          renderContainer.innerHTML = `
+            <style>
+              .filepilot-docx-content {
+                box-sizing: border-box;
+                width: 100%;
+                padding: 0;
+                background: #ffffff;
+                color: #111827;
+                font-family: Arial, Helvetica, sans-serif;
+                font-size: 12pt;
+                line-height: 1.5;
+                overflow-wrap: break-word;
+              }
+              .filepilot-docx-content h1 { font-size: 24pt; margin: 0 0 16pt; }
+              .filepilot-docx-content h2 { font-size: 18pt; margin: 16pt 0 10pt; }
+              .filepilot-docx-content h3 { font-size: 14pt; margin: 14pt 0 8pt; }
+              .filepilot-docx-content p { margin: 0 0 9pt; }
+              .filepilot-docx-content ul, .filepilot-docx-content ol {
+                padding-left: 28pt; margin: 0 0 10pt;
+              }
+              .filepilot-docx-content table {
+                width: 100%; border-collapse: collapse; margin: 12pt 0;
+              }
+              .filepilot-docx-content td, .filepilot-docx-content th {
+                border: 1px solid #9ca3af; padding: 5pt; vertical-align: top;
+              }
+              .filepilot-docx-content img { max-width: 100%; height: auto; }
+              .filepilot-docx-content blockquote {
+                margin: 10pt 0; padding-left: 12pt; border-left: 3px solid #cbd5e1;
+              }
+            </style>
+            <article class="filepilot-docx-content">${conversion.value}</article>
+          `;
+
+          // Allow the browser to lay out converted HTML before canvas capture.
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+          const pdfBlob = await html2pdf()
+            .set({
+              margin: [12, 12, 12, 12],
+              filename: file.name.replace(/\.docx$/i, ".pdf"),
+              image: { type: "jpeg", quality: 0.95 },
+              html2canvas: {
+                scale: 2,
+                useCORS: true,
+                backgroundColor: "#ffffff",
+                logging: false,
+              },
+              jsPDF: {
+                unit: "mm",
+                format: "a4",
+                orientation: "portrait",
+              },
+            
+            })
+            .from(renderContainer)
+            .outputPdf("blob");
+
+          if (!(pdfBlob instanceof Blob) || pdfBlob.size === 0) {
+            throw new Error("The PDF renderer returned an empty file.");
+          }
+
+          const baseName = file.name.replace(/\.docx$/i, "");
+          converted.push({
+            id: `docx-to-pdf-${file.name}-${file.lastModified}-${index}`,
+            name: `${baseName}.pdf`,
+            blob: pdfBlob,
+            url: URL.createObjectURL(pdfBlob),
+            size: pdfBlob.size,
+          });
+        } catch (conversionError) {
+          failed.push(`${file.name}${conversionError instanceof Error ? ` (${conversionError.message})` : ""}`);
+        }
+
+        setProgress(Math.round(((index + 1) / files.length) * 100));
+      }
+
+      setResults(converted);
+      if (converted.length > 0 && failed.length === 0) {
+        setSuccess(`Successfully converted ${converted.length} Word document(s) to PDF.`);
+      } else if (converted.length > 0) {
+        setSuccess(`Converted ${converted.length} Word document(s); ${failed.length} failed.`);
+        setError(`Could not process: ${failed.join(", ")}`);
+      } else {
+        setError(`DOCX to PDF conversion failed. ${failed.join("; ") || "Please check the selected documents."}`);
+      }
+    } catch (conversionError) {
+      setError(
+        conversionError instanceof Error
+          ? `Could not load the DOCX-to-PDF libraries: ${conversionError.message}`
+          : "Could not load the DOCX-to-PDF libraries."
+      );
+    } finally {
+      renderContainer?.remove();
+      setConverting(false);
+    }
+  }
+
+  async function convertTxtToPdf() {
+    if (files.length === 0 || !files.every(isTxtFile)) {
+      setError("Please select one or more TXT text files.");
+      return;
+    }
+
+    setConverting(true);
+    setError("");
+    setSuccess("");
+    setProgress(0);
+    setResults([]);
+
+    const converted: ConversionResult[] = [];
+    const failed: string[] = [];
+
+    try {
+      for (let index = 0; index < files.length; index++) {
+        const file = files[index];
+
+        try {
+          const textContent = await file.text();
+          if (!textContent.trim()) {
+            throw new Error("The text file is empty.");
+          }
+
+          const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+          const pageWidth = pdf.internal.pageSize.getWidth();
+          const pageHeight = pdf.internal.pageSize.getHeight();
+          const margin = 18;
+          const usableWidth = pageWidth - margin * 2;
+          const lineHeight = 6;
+          const paragraphs = textContent.replace(/\\r\\n?/g, "\\n").split("\\n");
+          let y = margin;
+
+          pdf.setFont("helvetica", "normal");
+          pdf.setFontSize(11);
+
+          for (const paragraph of paragraphs) {
+            const wrappedLines = paragraph.length
+              ? pdf.splitTextToSize(paragraph, usableWidth)
+              : [""];
+
+            for (const line of wrappedLines) {
+              if (y + lineHeight > pageHeight - margin) {
+                pdf.addPage();
+                y = margin;
+              }
+
+              if (line) pdf.text(line, margin, y);
+              y += lineHeight;
+            }
+          }
+
+          const blob = pdf.output("blob");
+          const baseName = file.name.replace(/\\.txt$/i, "");
+
+          converted.push({
+            id: `txt-to-pdf-${file.name}-${file.lastModified}-${index}`,
+            name: `${baseName}.pdf`,
+            blob,
+            url: URL.createObjectURL(blob),
+            size: blob.size,
+          });
+        } catch (conversionError) {
+          failed.push(`${file.name}${conversionError instanceof Error ? ` (${conversionError.message})` : ""}`);
+        }
+
+        setProgress(Math.round(((index + 1) / files.length) * 100));
+      }
+
+      setResults(converted);
+      if (converted.length > 0 && failed.length === 0) {
+        setSuccess(`Successfully converted ${converted.length} text file(s) to PDF.`);
+      } else if (converted.length > 0) {
+        setSuccess(`Converted ${converted.length} text file(s); ${failed.length} failed.`);
+        setError(`Could not process: ${failed.join(", ")}`);
+      } else {
+        setError(`TXT to PDF conversion failed. ${failed.join("; ") || "Please check the selected files."}`);
+      }
+    } finally {
+      setConverting(false);
     }
   }
 
@@ -976,7 +1280,7 @@ export default function Home() {
               ref={inputRef}
               type="file"
               multiple
-              accept="application/pdf,image/png,image/jpeg,image/webp"
+              accept="application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx,text/plain,.txt,image/png,image/jpeg,image/webp"
               className="hidden"
               onChange={(event) => {
                 if (event.target.files) addFiles(event.target.files);
@@ -998,7 +1302,7 @@ export default function Home() {
             </span>
 
             <p className="mt-5 text-xs text-slate-400">
-              PDF · PNG · JPG · WebP · Multiple files supported
+              PDF · DOCX · TXT · PNG · JPG · WebP · Multiple files supported
             </p>
           </div>
 
@@ -1006,7 +1310,7 @@ export default function Home() {
             <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-5 text-left shadow-sm sm:p-6">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h3 className="font-bold">Selected {isPdfInput ? "PDFs" : "Images"} ({files.length})</h3>
+                  <h3 className="font-bold">Selected {isPdfInput ? "PDFs" : isDocxInput ? "Word documents" : isTxtInput ? "Text files" : "Images"} ({files.length})</h3>
                   <p className="mt-1 text-sm text-slate-500">
                     {formatSize(files.reduce((total, file) => total + file.size, 0))} total
                   </p>
@@ -1022,6 +1326,10 @@ export default function Home() {
                   <div key={`${file.name}-${file.lastModified}-${index}`} className="flex items-center gap-3 rounded-xl border border-slate-100 p-3">
                     {isPdfFile(file) ? (
                       <div className="flex h-20 w-20 items-center justify-center rounded-xl bg-red-50 text-3xl">📄</div>
+                    ) : isDocxFile(file) ? (
+                      <div className="flex h-20 w-20 items-center justify-center rounded-xl bg-blue-50 text-3xl">📝</div>
+                    ) : isTxtFile(file) ? (
+                      <div className="flex h-20 w-20 items-center justify-center rounded-xl bg-slate-100 text-3xl">📃</div>
                     ) : <ImagePreview file={file} />}
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-semibold">{file.name}</p>
@@ -1121,8 +1429,14 @@ export default function Home() {
                 </div>
               )}
 
+              {isDocxInput && format === "PDF" && (
+                <p className="mt-3 text-xs leading-5 text-amber-700">
+                  DOCX to PDF recreates the document from its content. Basic headings, paragraphs, lists, tables and images may be retained, but exact Word pagination and formatting can differ. The PDF pages are rendered as images, so text may not be selectable or searchable.
+                </p>
+              )}
+
               <button
-                onClick={isPdfInput ? convertPdfToImages : format === "PDF" ? convertImagesToPDF : convertImages}
+                onClick={isPdfInput ? convertPdfToImages : isDocxInput ? (format === "PDF" ? convertDocxToPdf : convertDocxToTxt) : isTxtInput ? convertTxtToPdf : format === "PDF" ? convertImagesToPDF : convertImages}
                 disabled={converting}
                 className="mt-6 w-full rounded-lg bg-blue-600 px-5 py-3 font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -1130,9 +1444,13 @@ export default function Home() {
                   ? `Converting ${progress}%...`
                   : isPdfInput
                     ? `Convert PDF${files.length > 1 ? "s" : ""} to ${format}`
-                    : format === "PDF"
-                      ? `Create PDF (${files.length} image${files.length > 1 ? "s" : ""})`
-                      : `Convert ${files.length} Image(s)`}
+                    : isDocxInput
+                      ? `Convert ${files.length} Word document${files.length > 1 ? "s" : ""} to ${format}`
+                      : isTxtInput
+                        ? `Convert ${files.length} text file${files.length > 1 ? "s" : ""} to PDF`
+                        : format === "PDF"
+                        ? `Create PDF (${files.length} image${files.length > 1 ? "s" : ""})`
+                        : `Convert ${files.length} Image(s)`}
               </button>
 
               {isPdfInput && files.length >= 2 && (
@@ -1383,7 +1701,7 @@ export default function Home() {
           <div className="text-3xl">🔒</div>
           <h2 className="mt-4 text-2xl font-bold">Your files deserve privacy</h2>
           <p className="mt-3 leading-7 text-slate-500">
-Image conversions, PDF conversion, merging, splitting and compression currently happen locally in your browser without uploading your files to a conversion server.
+Image conversions, DOCX text extraction, PDF conversion, merging, splitting and compression currently happen locally in your browser without uploading your files to a conversion server.
           </p>
         </div>
       </section>
