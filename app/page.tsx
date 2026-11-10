@@ -380,95 +380,287 @@ export default function Home() {
 
     const converted: ConversionResult[] = [];
     const failed: string[] = [];
-    let renderContainer: HTMLDivElement | null = null;
 
     try {
       const mammoth = await import("mammoth");
-      const html2pdfModule = await import("html2pdf.js");
-      const html2pdf = html2pdfModule.default;
-
-      renderContainer = document.createElement("div");
-      renderContainer.style.position = "fixed";
-      renderContainer.style.left = "-10000px";
-      renderContainer.style.top = "0";
-      renderContainer.style.width = "718px";
-      renderContainer.style.background = "#ffffff";
-      renderContainer.style.color = "#111827";
-      renderContainer.style.padding = "0";
-      renderContainer.style.zIndex = "-1";
-      document.body.appendChild(renderContainer);
 
       for (let index = 0; index < files.length; index++) {
         const file = files[index];
 
         try {
           const arrayBuffer = await file.arrayBuffer();
-          const conversion = await mammoth.convertToHtml({ arrayBuffer });
+          const conversion = await mammoth.convertToHtml(
+            { arrayBuffer },
+            {
+              convertImage: mammoth.images.imgElement(
+                async (image: {
+                  contentType: string;
+                  read: (encoding: string) => Promise<string>;
+                }) => {
+                  const base64 = await image.read("base64");
+                  return {
+                    src: `data:${image.contentType};base64,${base64}`,
+                  };
+                }
+              ),
+            }
+          );
 
           if (!conversion.value.trim()) {
             throw new Error("No readable document content was found.");
           }
 
-          renderContainer.innerHTML = `
-            <style>
-              .filepilot-docx-content {
-                box-sizing: border-box;
-                width: 100%;
-                padding: 0;
-                background: #ffffff;
-                color: #111827;
-                font-family: Arial, Helvetica, sans-serif;
-                font-size: 12pt;
-                line-height: 1.5;
-                overflow-wrap: break-word;
-              }
-              .filepilot-docx-content h1 { font-size: 24pt; margin: 0 0 16pt; }
-              .filepilot-docx-content h2 { font-size: 18pt; margin: 16pt 0 10pt; }
-              .filepilot-docx-content h3 { font-size: 14pt; margin: 14pt 0 8pt; }
-              .filepilot-docx-content p { margin: 0 0 9pt; }
-              .filepilot-docx-content ul, .filepilot-docx-content ol {
-                padding-left: 28pt; margin: 0 0 10pt;
-              }
-              .filepilot-docx-content table {
-                width: 100%; border-collapse: collapse; margin: 12pt 0;
-              }
-              .filepilot-docx-content td, .filepilot-docx-content th {
-                border: 1px solid #9ca3af; padding: 5pt; vertical-align: top;
-              }
-              .filepilot-docx-content img { max-width: 100%; height: auto; }
-              .filepilot-docx-content blockquote {
-                margin: 10pt 0; padding-left: 12pt; border-left: 3px solid #cbd5e1;
-              }
-            </style>
-            <article class="filepilot-docx-content">${conversion.value}</article>
-          `;
+          // Use jsPDF's native text drawing instead of html2canvas.
+          // This avoids the blank-canvas issue and keeps PDF text selectable.
+          const parsed = new DOMParser().parseFromString(
+            `<div>${conversion.value}</div>`,
+            "text/html"
+          );
+          const root = parsed.body.firstElementChild as HTMLElement | null;
 
-          // Allow the browser to lay out converted HTML before canvas capture.
-          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+          if (!root || !root.textContent?.trim()) {
+            throw new Error("The Word document did not contain readable text.");
+          }
 
-          const pdfBlob = await html2pdf()
-            .set({
-              margin: [12, 12, 12, 12],
-              filename: file.name.replace(/\.docx$/i, ".pdf"),
-              image: { type: "jpeg", quality: 0.95 },
-              html2canvas: {
-                scale: 2,
-                useCORS: true,
-                backgroundColor: "#ffffff",
-                logging: false,
-              },
-              jsPDF: {
-                unit: "mm",
-                format: "a4",
-                orientation: "portrait",
-              },
-            
-            })
-            .from(renderContainer)
-            .outputPdf("blob");
+          const pdf = new jsPDF({
+            orientation: "portrait",
+            unit: "mm",
+            format: "a4",
+          });
 
-          if (!(pdfBlob instanceof Blob) || pdfBlob.size === 0) {
-            throw new Error("The PDF renderer returned an empty file.");
+          const pageWidth = pdf.internal.pageSize.getWidth();
+          const pageHeight = pdf.internal.pageSize.getHeight();
+          const margin = 18;
+          const usableWidth = pageWidth - margin * 2;
+          const bottomLimit = pageHeight - margin;
+          let y = margin;
+
+          type TextRun = { text: string; bold: boolean; italic: boolean };
+
+          const collectRuns = (
+            node: Node,
+            inherited: { bold: boolean; italic: boolean } = { bold: false, italic: false }
+          ): TextRun[] => {
+            if (node.nodeType === Node.TEXT_NODE) {
+              const value = node.textContent ?? "";
+              return value ? [{ text: value, ...inherited }] : [];
+            }
+
+            if (!(node instanceof HTMLElement)) return [];
+
+            const tag = node.tagName.toLowerCase();
+            const style = {
+              bold: inherited.bold || tag === "strong" || tag === "b",
+              italic: inherited.italic || tag === "em" || tag === "i",
+            };
+
+            return Array.from(node.childNodes).flatMap((child) => collectRuns(child, style));
+          };
+
+          const addPageIfNeeded = (neededHeight: number) => {
+            if (y + neededHeight > bottomLimit) {
+              pdf.addPage();
+              y = margin;
+            }
+          };
+
+          const drawParagraph = (
+            element: HTMLElement,
+            options: { fontSize?: number; bold?: boolean; italic?: boolean; indent?: number; after?: number } = {}
+          ) => {
+            const fontSize = options.fontSize ?? 11;
+            const indent = options.indent ?? 0;
+            const lineHeight = fontSize * 0.48;
+            const availableWidth = usableWidth - indent;
+            const runs = collectRuns(element);
+            const fullText = runs.map((run) => run.text).join("").replace(/\s+/g, " ").trim();
+
+            if (!fullText) {
+              y += lineHeight * 0.6;
+              return;
+            }
+
+            // Wrap at word boundaries while measuring each run in its actual font style.
+            const words: TextRun[] = [];
+            for (const run of runs) {
+              const parts = run.text.split(/(\s+)/).filter(Boolean);
+              for (const part of parts) {
+                words.push({
+                  text: part,
+                  bold: run.bold || Boolean(options.bold),
+                  italic: run.italic || Boolean(options.italic),
+                });
+              }
+            }
+
+            const lines: TextRun[][] = [];
+            let currentLine: TextRun[] = [];
+            let currentWidth = 0;
+
+            for (const word of words) {
+              pdf.setFont("helvetica", word.bold && word.italic ? "bolditalic" : word.bold ? "bold" : word.italic ? "italic" : "normal");
+              pdf.setFontSize(fontSize);
+              const wordWidth = pdf.getTextWidth(word.text);
+
+              if (currentLine.length > 0 && currentWidth + wordWidth > availableWidth) {
+                lines.push(currentLine);
+                currentLine = [];
+                currentWidth = 0;
+              }
+
+              currentLine.push(word);
+              currentWidth += wordWidth;
+            }
+            if (currentLine.length) lines.push(currentLine);
+
+            for (const line of lines) {
+              addPageIfNeeded(lineHeight);
+              let x = margin + indent;
+
+              for (const run of line) {
+                pdf.setFont(
+                  "helvetica",
+                  run.bold && run.italic ? "bolditalic" : run.bold ? "bold" : run.italic ? "italic" : "normal"
+                );
+                pdf.setFontSize(fontSize);
+                pdf.text(run.text, x, y);
+                x += pdf.getTextWidth(run.text);
+              }
+              y += lineHeight;
+            }
+
+            y += options.after ?? 2.5;
+          };
+
+          const processList = (list: HTMLElement, depth = 0) => {
+            const ordered = list.tagName.toLowerCase() === "ol";
+            let number = 1;
+            for (const child of Array.from(list.children)) {
+              if (!(child instanceof HTMLElement) || child.tagName.toLowerCase() !== "li") continue;
+
+              const nestedLists = Array.from(child.children).filter(
+                (element) => ["ul", "ol"].includes(element.tagName.toLowerCase())
+              );
+              const directText = Array.from(child.childNodes)
+                .filter((node) => !(node instanceof HTMLElement && ["ul", "ol"].includes(node.tagName.toLowerCase())))
+                .map((node) => node.textContent ?? "")
+                .join(" ")
+                .trim();
+
+              if (directText) {
+                const marker = ordered ? `${number}. ` : "• ";
+                const item = parsed.createElement("span");
+                item.textContent = `${marker}${directText}`;
+                drawParagraph(item, { indent: depth * 5, after: 1.5 });
+              }
+
+              nestedLists.forEach((nested) => processList(nested as HTMLElement, depth + 1));
+              number += 1;
+            }
+            y += 1;
+          };
+
+          const processTable = (table: HTMLTableElement) => {
+            const rows = Array.from(table.querySelectorAll("tr"));
+            for (const row of rows) {
+              const cells = Array.from(row.querySelectorAll("th, td"));
+              const rowText = cells.map((cell) => (cell.textContent ?? "").replace(/\s+/g, " ").trim()).join("   |   ");
+              const rowElement = parsed.createElement("span");
+              rowElement.textContent = rowText;
+              drawParagraph(rowElement, { fontSize: 9.5, after: 2 });
+            }
+            y += 2;
+          };
+
+          const addEmbeddedImage = async (imageElement: HTMLImageElement) => {
+            const src = imageElement.getAttribute("src");
+            if (!src || !src.startsWith("data:image/")) return;
+
+            const image = new Image();
+            image.src = src;
+            await image.decode();
+
+            const naturalWidth = image.naturalWidth || 1;
+            const naturalHeight = image.naturalHeight || 1;
+            const scale = Math.min(
+              usableWidth / naturalWidth,
+              95 / naturalHeight,
+              1
+            );
+            const imageWidth = naturalWidth * scale;
+            const imageHeight = naturalHeight * scale;
+
+            addPageIfNeeded(imageHeight + 4);
+            const x = margin + (usableWidth - imageWidth) / 2;
+            const imageType = src.startsWith("data:image/png") ? "PNG" : "JPEG";
+
+            try {
+              pdf.addImage(src, imageType, x, y, imageWidth, imageHeight);
+              y += imageHeight + 4;
+            } catch {
+              y += 2;
+            }
+          };
+
+          const processImagesWithin = async (element: Element) => {
+            for (const image of Array.from(element.querySelectorAll("img"))) {
+              await addEmbeddedImage(image as HTMLImageElement);
+            }
+          };
+
+          const processBlock = async (element: Element): Promise<void> => {
+            const tag = element.tagName.toLowerCase();
+
+            if (tag === "ul" || tag === "ol") {
+              processList(element as HTMLElement);
+              await processImagesWithin(element);
+              return;
+            }
+
+            if (tag === "table") {
+              processTable(element as HTMLTableElement);
+              await processImagesWithin(element);
+              return;
+            }
+
+            if (["h1", "h2", "h3", "h4"].includes(tag)) {
+              const size = tag === "h1" ? 20 : tag === "h2" ? 16 : tag === "h3" ? 13 : 12;
+              drawParagraph(element as HTMLElement, { fontSize: size, bold: true, after: 4 });
+              await processImagesWithin(element);
+              return;
+            }
+
+            if (tag === "p" || tag === "blockquote" || tag === "div") {
+              drawParagraph(element as HTMLElement, { indent: tag === "blockquote" ? 5 : 0, after: 3 });
+              await processImagesWithin(element);
+              return;
+            }
+
+            if (tag === "img") {
+              await addEmbeddedImage(element as HTMLImageElement);
+              return;
+            }
+
+            if (element.children.length > 0) {
+              for (const child of Array.from(element.children)) {
+                await processBlock(child);
+              }
+            } else if ((element.textContent ?? "").trim()) {
+              drawParagraph(element as HTMLElement);
+            }
+          };
+
+          for (const child of Array.from(root.children)) {
+            await processBlock(child);
+          }
+
+          if (pdf.getNumberOfPages() < 1 || y <= margin) {
+            throw new Error("No PDF content was generated from this Word document.");
+          }
+
+          const pdfBlob = pdf.output("blob");
+          if (!(pdfBlob instanceof Blob) || pdfBlob.size < 1000) {
+            throw new Error("The generated PDF is empty or incomplete.");
           }
 
           const baseName = file.name.replace(/\.docx$/i, "");
@@ -480,7 +672,9 @@ export default function Home() {
             size: pdfBlob.size,
           });
         } catch (conversionError) {
-          failed.push(`${file.name}${conversionError instanceof Error ? ` (${conversionError.message})` : ""}`);
+          failed.push(
+            `${file.name}${conversionError instanceof Error ? ` (${conversionError.message})` : ""}`
+          );
         }
 
         setProgress(Math.round(((index + 1) / files.length) * 100));
@@ -498,11 +692,10 @@ export default function Home() {
     } catch (conversionError) {
       setError(
         conversionError instanceof Error
-          ? `Could not load the DOCX-to-PDF libraries: ${conversionError.message}`
-          : "Could not load the DOCX-to-PDF libraries."
+          ? `Could not load the DOCX-to-PDF library: ${conversionError.message}`
+          : "Could not load the DOCX-to-PDF library."
       );
     } finally {
-      renderContainer?.remove();
       setConverting(false);
     }
   }
@@ -1431,7 +1624,7 @@ export default function Home() {
 
               {isDocxInput && format === "PDF" && (
                 <p className="mt-3 text-xs leading-5 text-amber-700">
-                  DOCX to PDF recreates the document from its content. Basic headings, paragraphs, lists, tables and images may be retained, but exact Word pagination and formatting can differ. The PDF pages are rendered as images, so text may not be selectable or searchable.
+                  DOCX to PDF recreates the document from its content. Basic headings, paragraphs, lists, tables and supported embedded images are retained, but exact Word pagination and formatting can differ. The PDF pages are rendered as images, so text may not be selectable or searchable.
                 </p>
               )}
 
